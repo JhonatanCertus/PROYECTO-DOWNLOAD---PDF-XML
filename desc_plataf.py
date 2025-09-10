@@ -1,6 +1,6 @@
 # ============================================================
 # DESCARGADOR DE FACTURAS (PDF/XML)
-# Version corregida con separación de "encontrados" y "descargados"
+# Con cierre de sesión al terminar la app
 # ============================================================
 
 import requests
@@ -16,8 +16,8 @@ import threading
 # ============================================================
 facturas_descargadas = 0
 facturas_fallidas = 0
-cerrar_app = False  # Control para detener la descarga si se cierra la ventana
-total_registros = 0  
+cerrar_app = False      # Control para detener la descarga si se cierra la ventana
+total_registros = 0     # Total de registros de facturas
 
 # Contadores para encontrados y descargados
 pdf_encontrados = 0
@@ -25,9 +25,12 @@ xml_encontrados = 0
 pdf_descargados = 0 
 xml_descargados = 0
 
-# Variables para checkboxes
+# Variables de checkboxes
 descargar_pdf = None
 descargar_xml = None
+
+# Variable global para la sesión HTTP
+session = None
 
 # URLs y cabeceras
 login_url = "https://facturacalvicperu.com/fealvic/factura/BL/BL_principal.php"
@@ -70,8 +73,8 @@ def descargar_archivo(session, url, nombre_archivo, download_folder):
 
 def procesar_fila(row, base_url, session, download_folder):
     """
-    Procesa una fila de facturas y descarga PDF/XML 
-    (ya no cuenta encontrados, solo descarga).
+    Procesa una fila de facturas y descarga PDF/XML.
+    Ya no cuenta encontrados, solo descarga los seleccionados.
     """
     global pdf_descargados, xml_descargados
     if cerrar_app:
@@ -102,7 +105,7 @@ def procesar_fila(row, base_url, session, download_folder):
 
 def procesar_pagina(session, payload_facturas, page, pagsize, facturas_url, base_url, download_folder):
     """
-    Procesa una página de facturas con descargas en paralelo.
+    Procesa una página de facturas con descargas en paralelo (multihilo).
     """
     if cerrar_app:
         return
@@ -128,7 +131,6 @@ def contar_archivos(session, payload_facturas, facturas_url, pagsize):
     resp_facturas = session.post(facturas_url, data=payload_facturas, headers=headers)
     data = resp_facturas.json()
     total_registros = data.get("records", 0)
-    pagsize =100
     total_paginas = (total_registros + pagsize - 1) // pagsize
 
     # Contar en todas las páginas
@@ -186,7 +188,7 @@ def iniciar_descarga():
     Maneja login, conteo y descarga de facturas.
     """
     global facturas_descargadas, facturas_fallidas, total_registros
-    global cerrar_app, pdf_descargados, xml_descargados
+    global cerrar_app, pdf_descargados, xml_descargados, session
 
     # Resetear contadores
     pdf_descargados = 0 
@@ -215,7 +217,7 @@ def iniciar_descarga():
         download_folder = os.path.join(os.path.expanduser("~"), "FacturasDescargadas")
     os.makedirs(download_folder, exist_ok=True)
 
-    # Login
+    # Crear sesión HTTP
     session = requests.Session()
     payload_login = {
         "module": "mdlaccess",
@@ -242,19 +244,7 @@ def iniciar_descarga():
 
     # ✅ Luego descargar
     total_paginas = (total_registros + pagsize - 1) // pagsize
-
-    # Ajustar máximo según lo que selecciona el usuario
-    if descargar_pdf.get() and descargar_xml.get():
-        total_a_descargar = pdf_encontrados + xml_encontrados
-    elif descargar_pdf.get():
-        total_a_descargar = pdf_encontrados
-    elif descargar_xml.get():
-        total_a_descargar = xml_encontrados
-    else:
-        total_a_descargar = 0
-    progress['maximum'] = total_a_descargar
-
-
+    progress['maximum'] = total_registros
     for page in range(1, total_paginas + 1):
         if cerrar_app:
             break
@@ -315,10 +305,23 @@ btn_descargar.grid(row=8, column=0, columnspan=4, pady=20)
 progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
 progress.grid(row=9, column=0, columnspan=4, pady=10)
 
-# Cierre seguro
+# ============================================================
+# CIERRE SEGURO
+# ============================================================
 def on_close():
-    global cerrar_app
+    """
+    Maneja el cierre seguro de la app:
+    - Marca la bandera para detener descargas.
+    - Cierra la sesión HTTP si existe.
+    - Destruye la ventana.
+    """
+    global cerrar_app, session
     cerrar_app = True
+    try:
+        if session:
+            session.close()   # ✅ Cierra la sesión explícitamente
+    except:
+        pass
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_close)
