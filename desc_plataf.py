@@ -1,10 +1,10 @@
 # ============================================================
-# VERSION PERPETUA (SIN BUSCAR)
+# DESCARGADOR DE FACTURAS (PDF/XML)
+# Version corregida con separación de "encontrados" y "descargados"
 # ============================================================
 
 import requests
 import os
-import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkcalendar import DateEntry
@@ -17,14 +17,15 @@ import threading
 facturas_descargadas = 0
 facturas_fallidas = 0
 cerrar_app = False  # Control para detener la descarga si se cierra la ventana
-total_registros = 0  # Inicializar para evitar errores
+total_registros = 0  
+
+# Contadores para encontrados y descargados
 pdf_encontrados = 0
 xml_encontrados = 0
 pdf_descargados = 0 
 xml_descargados = 0
 
-
-# Opciones de descarga (se controlan con casillas en la GUI)
+# Variables para checkboxes
 descargar_pdf = None
 descargar_xml = None
 
@@ -43,9 +44,7 @@ headers = {
 # FUNCIONES DE DESCARGA
 # ============================================================
 
-
 def descargar_archivo(session, url, nombre_archivo, download_folder):
-
     """
     Descarga un archivo PDF o XML y actualiza barra de progreso y contador.
     """
@@ -64,50 +63,37 @@ def descargar_archivo(session, url, nombre_archivo, download_folder):
     except:
         facturas_fallidas += 1
 
-    # Actualizar barra y contador
+    # Actualizar barra de progreso
     progress['value'] = facturas_descargadas + facturas_fallidas
-    #progress_label.config(text=f"{facturas_descargadas + facturas_fallidas}/{total_registros}")
     root.update_idletasks()
 
 
 def procesar_fila(row, base_url, session, download_folder):
+    """
+    Procesa una fila de facturas y descarga PDF/XML 
+    (ya no cuenta encontrados, solo descarga).
+    """
     global pdf_descargados, xml_descargados
-
-    """
-    Procesa una fila de facturas y descarga PDF/XML solo si las casillas están activadas.
-    """
-    global pdf_encontrados, xml_encontrados
-
-
-    # Actualizar label de encontrados
-    pdf_encontrados_label.config(text=f"PDF encontrados: {pdf_encontrados}")
-    xml_encontrados_label.config(text=f"XML encontrados: {xml_encontrados}")
-    
     if cerrar_app:
         return
+
     serie_num = f"{row.get('serie', 'NA')}-{row.get('numero', 'NA')}"
     pdf_link = row.get('urlpdf')
     xml_link = row.get('urlxml')
 
-    # Contar archivos encontrados
-    if pdf_link:
-        pdf_encontrados += 1
-    if xml_link:
-        xml_encontrados += 1
-
     # Ajustar URLs relativas
     if pdf_link and pdf_link.startswith('/'):
         pdf_link = base_url + pdf_link.lstrip('/')
-    
     if xml_link and xml_link.startswith('/'):
         xml_link = base_url + xml_link.lstrip('/')
-        
 
-    # Respetar selección del usuario
+    # Descargar PDF si está habilitado
     if descargar_pdf.get() and pdf_link:
         descargar_archivo(session, pdf_link, f"{serie_num}.pdf", download_folder)
         pdf_descargados += 1
         pdf_label.config(text=f"PDF Descargados: {pdf_descargados}")
+
+    # Descargar XML si está habilitado
     if descargar_xml.get() and xml_link:
         descargar_archivo(session, xml_link, f"{serie_num}.xml", download_folder)
         xml_descargados += 1
@@ -124,9 +110,43 @@ def procesar_pagina(session, payload_facturas, page, pagsize, facturas_url, base
     payload_facturas["pPageSize"] = str(pagsize)
     resp = session.post(facturas_url, data=payload_facturas, headers=headers)
     data = resp.json()
+
     with ThreadPoolExecutor(max_workers=20) as executor:
         for row in data.get("rows", []):
             executor.submit(procesar_fila, row, base_url, session, download_folder)
+
+
+def contar_archivos(session, payload_facturas, facturas_url, pagsize):
+    """
+    Recorre todas las páginas y cuenta PDFs y XMLs encontrados.
+    """
+    global pdf_encontrados, xml_encontrados, total_registros
+    pdf_encontrados = 0
+    xml_encontrados = 0
+
+    # Obtener total de registros
+    resp_facturas = session.post(facturas_url, data=payload_facturas, headers=headers)
+    data = resp_facturas.json()
+    total_registros = data.get("records", 0)
+    total_paginas = (total_registros + pagsize - 1) // pagsize
+
+    # Contar en todas las páginas
+    for page in range(1, total_paginas + 1):
+        payload_facturas["pCurrentPage"] = str(page)
+        payload_facturas["pPageSize"] = str(pagsize)
+        resp = session.post(facturas_url, data=payload_facturas, headers=headers)
+        data = resp.json()
+
+        for row in data.get("rows", []):
+            if row.get("urlpdf"):
+                pdf_encontrados += 1
+            if row.get("urlxml"):
+                xml_encontrados += 1
+
+    # Actualizar labels en pantalla
+    pdf_encontrados_label.config(text=f"PDF encontrados: {pdf_encontrados}")
+    xml_encontrados_label.config(text=f"XML encontrados: {xml_encontrados}")
+
 
 # ============================================================
 # VENTANA FINAL
@@ -144,19 +164,17 @@ def mostrar_final(download_folder):
     tk.Label(
         final_win,
         text=f"✅ Descarga finalizada\n\n"
-             f"Archivos descargadas: {facturas_descargadas}\n"
+             f"Archivos descargados: {facturas_descargadas}\n"
              f"Archivos con error: {facturas_fallidas}\n\n"
              f"Archivos guardados en:\n{download_folder}",
     ).pack()
 
-   # Botón Aceptar → Cierra solo esta ventana
     def cerrar_ventana_final():
         final_win.destroy()
 
     tk.Button(final_win, text="Aceptar", command=cerrar_ventana_final).pack(pady=30)
-
-    # Si el usuario intenta cerrar con la X de la ventana, también solo cierra esta ventana
     final_win.protocol("WM_DELETE_WINDOW", cerrar_ventana_final)
+
 
 # ============================================================
 # FUNCIÓN PRINCIPAL
@@ -164,9 +182,12 @@ def mostrar_final(download_folder):
 
 def iniciar_descarga():
     """
-    Maneja login, consulta y descarga de facturas.
+    Maneja login, conteo y descarga de facturas.
     """
-    global facturas_descargadas, facturas_fallidas, total_registros, cerrar_app, pdf_descargados, xml_descargados, pdf_encontrados, xml_encontrados
+    global facturas_descargadas, facturas_fallidas, total_registros
+    global cerrar_app, pdf_descargados, xml_descargados
+
+    # Resetear contadores
     pdf_descargados = 0 
     xml_descargados = 0
     facturas_descargadas = 0
@@ -176,25 +197,18 @@ def iniciar_descarga():
     fstart = entry_fstart.get().strip()
     fend = entry_fend.get().strip()
     fserie = entry_fserie.get().strip()
-    #fnumDesde = entry_fnumDesde.get().strip()
-    #fnumHasta = entry_fnumHasta.get().strip()
     fruc = entry_fruc.get().strip()
 
-     # Resetear labels visualmente
+    # Resetear labels visuales
     pdf_label.config(text=f"PDF Descargados: {pdf_descargados}")
     xml_label.config(text=f"XML Descargados: {xml_descargados}")
-    progress['value'] = 0
-
-    # Resetear labels visualmente
-    pdf_label.config(text=f"PDF Descargados: {pdf_descargados}")
-    xml_label.config(text=f"XML Descargados: {xml_descargados}")
-    
     progress['value'] = 0
 
     if not fstart or not fend:
         messagebox.showerror("Error", "Debes ingresar fecha de inicio y final.")
         return
 
+    # Carpeta de destino
     download_folder = filedialog.askdirectory(title="Selecciona carpeta")
     if not download_folder:
         download_folder = os.path.join(os.path.expanduser("~"), "FacturasDescargadas")
@@ -202,40 +216,32 @@ def iniciar_descarga():
 
     # Login
     session = requests.Session()
-    payload_login = {"module": "mdlaccess", "fruc": "20526276486",
-                     "flogin": "adminmiraflores@gmail.com", "fclave": "123456"}
-    resp_login = session.post(login_url, data=payload_login, headers=headers)
-    #if resp_login.status_code != 200:
-    #    messagebox.showerror("Error", "No se pudo iniciar sesión")
-    #    return
+    payload_login = {
+        "module": "mdlaccess",
+        "fruc": "20526276486",
+        "flogin": "adminmiraflores@gmail.com",
+        "fclave": "123456"
+    }
+    session.post(login_url, data=payload_login, headers=headers)
 
     # Payload facturas
     base_url = "https://facturacalvicperu.com/fealvic/factura/BL/"
-    payload_facturas = {"pCurrentPage": '1', "pPageSize": '100', "order": 'f_emision desc',
-                        "action": 'mdlLoadData2', "fstart": fstart, "fend": fend,
-                        "ftipdoc": '', "festado": '', "fserie": fserie,
-                        "fnumDesde":'', "fnumHasta": '',
-                        "fusuario": '', "fruc": fruc, "festacion": ''}
+    payload_facturas = {
+        "pCurrentPage": '1', "pPageSize": '100', "order": 'f_emision desc',
+        "action": 'mdlLoadData2', "fstart": fstart, "fend": fend,
+        "ftipdoc": '', "festado": '', "fserie": fserie,
+        "fnumDesde":'', "fnumHasta": '',
+        "fusuario": '', "fruc": fruc, "festacion": ''
+    }
 
-    resp_facturas = session.post(facturas_url, data=payload_facturas, headers=headers)
-    data = resp_facturas.json()
-    total_registros = data.get("records", 0)
-    pdf_encontrados = 0
-    xml_encontrados = 0
-    # Contamos PDF y XML encontrados en la primera página
-    for row in data.get("rows", []):
-        if row.get("urlpdf"):
-            pdf_encontrados += 1
-        if row.get("urlxml"):
-            xml_encontrados += 1
     pagsize = 100
+
+    # ✅ Primero contar encontrados
+    contar_archivos(session, payload_facturas.copy(), facturas_url, pagsize)
+
+    # ✅ Luego descargar
     total_paginas = (total_registros + pagsize - 1) // pagsize
-
     progress['maximum'] = total_registros
-    progress['value'] = 0
-    #progress_label.config(text=f"0/{total_registros}")
-
-    # Descarga todas las páginas
     for page in range(1, total_paginas + 1):
         if cerrar_app:
             break
@@ -243,6 +249,7 @@ def iniciar_descarga():
 
     if not cerrar_app:
         mostrar_final(download_folder)
+
 
 # ============================================================
 # GUI PRINCIPAL
@@ -267,28 +274,20 @@ entry_fend.grid(row=1, column=1)
 tk.Label(root, text="Serie de factura:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
 entry_fserie = tk.Entry(root, width=15)
 entry_fserie.grid(row=2, column=1, padx=5, pady=5)
-"""""""""""""""""""""""
-tk.Label(root, text="Desde Nro:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-entry_fnumDesde = tk.Entry(root, width=15)
-entry_fnumDesde.grid(row=3, column=1, padx=5, pady=5)
 
-tk.Label(root, text="Hasta Nro:").grid(row=3, column=2, sticky="w", padx=5, pady=5)
-entry_fnumHasta = tk.Entry(root, width=15)
-entry_fnumHasta.grid(row=3, column=3, padx=5, pady=5)
-"""""""""""""""""""""""
 tk.Label(root, text="RUC Cliente:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
 entry_fruc = tk.Entry(root, width=15)
 entry_fruc.grid(row=3, column=1, padx=5, pady=5)
 
-# Checkboxes para PDF y XML
+# Checkboxes PDF/XML
 tk.Checkbutton(root, text="Descargar PDF", variable=descargar_pdf).grid(row=5, column=0, padx=5, pady=5, sticky="w")
 tk.Checkbutton(root, text="Descargar XML", variable=descargar_xml).grid(row=5, column=1, padx=5, pady=5, sticky="w")
 
-# Label de Visualizacion
+# Labels para visualización
 pdf_encontrados_label = tk.Label(root, text="PDF encontrados: 0", width=25)
-pdf_encontrados_label.grid(row=6, column=0, columnspan=1, sticky="w", padx=10)
+pdf_encontrados_label.grid(row=6, column=0, sticky="w", padx=10)
 xml_encontrados_label = tk.Label(root, text="XML encontrados: 0", width=25)
-xml_encontrados_label.grid(row=6, column=1, columnspan=1, sticky="w", padx=10)
+xml_encontrados_label.grid(row=6, column=1, sticky="w", padx=10)
 
 pdf_label = tk.Label(root, text="PDF Descargados: 0", width=20)
 pdf_label.grid(row=7, column=0, sticky="w", padx=10)
@@ -298,10 +297,6 @@ xml_label.grid(row=7, column=1, sticky="w", padx=10)
 # Botón iniciar
 btn_descargar = tk.Button(root, text="Iniciar descarga", command=lambda: threading.Thread(target=iniciar_descarga).start())
 btn_descargar.grid(row=8, column=0, columnspan=4, pady=20)
-
-"""# Contador alineado derecha
-progress_label = tk.Label(root, text="0/0", anchor="e", width=20)
-progress_label.grid(row=8, column=3, sticky="e", padx=10)"""
 
 # Barra progreso
 progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
