@@ -128,6 +128,7 @@ def contar_archivos(session, payload_facturas, facturas_url, pagsize):
     resp_facturas = session.post(facturas_url, data=payload_facturas, headers=headers)
     data = resp_facturas.json()
     total_registros = data.get("records", 0)
+    pagsize =100
     total_paginas = (total_registros + pagsize - 1) // pagsize
 
     # Contar en todas las páginas
@@ -241,7 +242,19 @@ def iniciar_descarga():
 
     # ✅ Luego descargar
     total_paginas = (total_registros + pagsize - 1) // pagsize
-    progress['maximum'] = total_registros
+
+    # Ajustar máximo según lo que selecciona el usuario
+    if descargar_pdf.get() and descargar_xml.get():
+        total_a_descargar = pdf_encontrados + xml_encontrados
+    elif descargar_pdf.get():
+        total_a_descargar = pdf_encontrados
+    elif descargar_xml.get():
+        total_a_descargar = xml_encontrados
+    else:
+        total_a_descargar = 0
+    progress['maximum'] = total_a_descargar
+
+
     for page in range(1, total_paginas + 1):
         if cerrar_app:
             break
@@ -284,9 +297,9 @@ tk.Checkbutton(root, text="Descargar PDF", variable=descargar_pdf).grid(row=5, c
 tk.Checkbutton(root, text="Descargar XML", variable=descargar_xml).grid(row=5, column=1, padx=5, pady=5, sticky="w")
 
 # Labels para visualización
-pdf_encontrados_label = tk.Label(root, text="PDF encontrados: 0", width=25)
+pdf_encontrados_label = tk.Label(root, text="PDF encontrados: 0", width=20)
 pdf_encontrados_label.grid(row=6, column=0, sticky="w", padx=10)
-xml_encontrados_label = tk.Label(root, text="XML encontrados: 0", width=25)
+xml_encontrados_label = tk.Label(root, text="XML encontrados: 0", width=20)
 xml_encontrados_label.grid(row=6, column=1, sticky="w", padx=10)
 
 pdf_label = tk.Label(root, text="PDF Descargados: 0", width=20)
