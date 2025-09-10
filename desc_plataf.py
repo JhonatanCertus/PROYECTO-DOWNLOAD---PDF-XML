@@ -150,7 +150,6 @@ def contar_archivos(session, payload_facturas, facturas_url, pagsize):
     pdf_encontrados_label.config(text=f"PDF encontrados: {pdf_encontrados}")
     xml_encontrados_label.config(text=f"XML encontrados: {xml_encontrados}")
 
-
 # ============================================================
 # VENTANA FINAL
 # ============================================================
@@ -163,7 +162,6 @@ def mostrar_final(download_folder):
     final_win.title("Proceso finalizado")
     final_win.resizable(False, False)
 
-    # Texto resumen
     tk.Label(
         final_win,
         text=f"✅ Descarga finalizada\n\n"
@@ -177,7 +175,6 @@ def mostrar_final(download_folder):
 
     tk.Button(final_win, text="Aceptar", command=cerrar_ventana_final).pack(pady=30)
     final_win.protocol("WM_DELETE_WINDOW", cerrar_ventana_final)
-
 
 # ============================================================
 # FUNCIÓN PRINCIPAL
@@ -230,21 +227,31 @@ def iniciar_descarga():
     # Payload facturas
     base_url = "https://facturacalvicperu.com/fealvic/factura/BL/"
     payload_facturas = {
-        "pCurrentPage": '1', "pPageSize": '100', "order": 'f_emision desc',
+        "pCurrentPage": '1', "pPageSize": '10', "order": 'f_emision desc',
         "action": 'mdlLoadData2', "fstart": fstart, "fend": fend,
         "ftipdoc": '', "festado": '', "fserie": fserie,
         "fnumDesde":'', "fnumHasta": '',
         "fusuario": '', "fruc": fruc, "festacion": ''
     }
 
-    pagsize = 100
+    pagsize = 10
 
     # ✅ Primero contar encontrados
     contar_archivos(session, payload_facturas.copy(), facturas_url, pagsize)
 
+    # ✅ Ajustar progreso según selección del usuario
+    if descargar_pdf.get() and descargar_xml.get():
+        total_a_descargar = pdf_encontrados + xml_encontrados
+    elif descargar_pdf.get():
+        total_a_descargar = pdf_encontrados
+    elif descargar_xml.get():
+        total_a_descargar = xml_encontrados
+    else:
+        total_a_descargar = 0
+    progress['maximum'] = total_a_descargar
+
     # ✅ Luego descargar
     total_paginas = (total_registros + pagsize - 1) // pagsize
-    progress['maximum'] = total_registros
     for page in range(1, total_paginas + 1):
         if cerrar_app:
             break
@@ -252,7 +259,6 @@ def iniciar_descarga():
 
     if not cerrar_app:
         mostrar_final(download_folder)
-
 
 # ============================================================
 # GUI PRINCIPAL
