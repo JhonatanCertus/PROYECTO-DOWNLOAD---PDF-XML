@@ -1,6 +1,10 @@
 # ============================================================
 # DESCARGADOR DE FACTURAS (PDF/XML)
-# Con cierre de sesión al terminar la app
+# Versión optimizada:
+# - Evita recorrer el servidor dos veces (conteo + descarga).
+# - Usa ThreadPoolExecutor para descargas en paralelo.
+# - Barra de progreso dinámica según PDF/XML seleccionados.
+# - Cierre seguro de sesión y aplicación.
 # ============================================================
 
 import requests
@@ -17,22 +21,21 @@ import threading
 facturas_descargadas = 0
 facturas_fallidas = 0
 cerrar_app = False      # Control para detener la descarga si se cierra la ventana
-total_registros = 0     # Total de registros de facturas
 
 # Contadores para encontrados y descargados
 pdf_encontrados = 0
 xml_encontrados = 0
-pdf_descargados = 0 
+pdf_descargados = 0
 xml_descargados = 0
 
 # Variables de checkboxes
 descargar_pdf = None
 descargar_xml = None
 
-# Variable global para la sesión HTTP
+# Sesión HTTP (global para poder cerrarla)
 session = None
 
-# URLs y cabeceras
+# URLs y cabeceras HTTP
 login_url = "https://facturacalvicperu.com/fealvic/factura/BL/BL_principal.php"
 facturas_url = "https://facturacalvicperu.com/fealvic/factura/BL/BL_principal2.php"
 headers = {
@@ -73,8 +76,7 @@ def descargar_archivo(session, url, nombre_archivo, download_folder):
 
 def procesar_fila(row, base_url, session, download_folder):
     """
-    Procesa una fila de facturas y descarga PDF/XML.
-    Ya no cuenta encontrados, solo descarga los seleccionados.
+    Procesa una fila de facturas y descarga PDF/XML según selección.
     """
     global pdf_descargados, xml_descargados
     if cerrar_app:
@@ -84,7 +86,7 @@ def procesar_fila(row, base_url, session, download_folder):
     pdf_link = row.get('urlpdf')
     xml_link = row.get('urlxml')
 
-    # Ajustar URLs relativas
+    # Ajustar URLs relativas a absolutas
     if pdf_link and pdf_link.startswith('/'):
         pdf_link = base_url + pdf_link.lstrip('/')
     if xml_link and xml_link.startswith('/'):
@@ -103,52 +105,32 @@ def procesar_fila(row, base_url, session, download_folder):
         xml_label.config(text=f"XML Descargados: {xml_descargados}")
 
 
-def procesar_pagina(session, payload_facturas, page, pagsize, facturas_url, base_url, download_folder):
+def obtener_facturas(session, payload_facturas, pagsize):
     """
-    Procesa una página de facturas con descargas en paralelo (multihilo).
+    Genera todas las filas de facturas (streaming):
+    - Hace una sola pasada por todas las páginas.
+    - Evita tener que contar primero y luego volver a recorrer.
     """
-    if cerrar_app:
-        return
-    payload_facturas["pCurrentPage"] = str(page)
-    payload_facturas["pPageSize"] = str(pagsize)
+    # Primer request para saber cuántos registros hay
     resp = session.post(facturas_url, data=payload_facturas, headers=headers)
     data = resp.json()
-
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        for row in data.get("rows", []):
-            executor.submit(procesar_fila, row, base_url, session, download_folder)
-
-
-def contar_archivos(session, payload_facturas, facturas_url, pagsize):
-    """
-    Recorre todas las páginas y cuenta PDFs y XMLs encontrados.
-    """
-    global pdf_encontrados, xml_encontrados, total_registros
-    pdf_encontrados = 0
-    xml_encontrados = 0
-
-    # Obtener total de registros
-    resp_facturas = session.post(facturas_url, data=payload_facturas, headers=headers)
-    data = resp_facturas.json()
     total_registros = data.get("records", 0)
     total_paginas = (total_registros + pagsize - 1) // pagsize
 
-    # Contar en todas las páginas
-    for page in range(1, total_paginas + 1):
+    # Rendimos la primera página ya obtenida
+    for row in data.get("rows", []):
+        yield row
+
+    # Recorremos las demás páginas
+    for page in range(2, total_paginas + 1):
+        if cerrar_app:
+            break
         payload_facturas["pCurrentPage"] = str(page)
         payload_facturas["pPageSize"] = str(pagsize)
         resp = session.post(facturas_url, data=payload_facturas, headers=headers)
         data = resp.json()
-
         for row in data.get("rows", []):
-            if row.get("urlpdf"):
-                pdf_encontrados += 1
-            if row.get("urlxml"):
-                xml_encontrados += 1
-
-    # Actualizar labels en pantalla
-    pdf_encontrados_label.config(text=f"PDF encontrados: {pdf_encontrados}")
-    xml_encontrados_label.config(text=f"XML encontrados: {xml_encontrados}")
+            yield row
 
 # ============================================================
 # VENTANA FINAL
@@ -182,14 +164,17 @@ def mostrar_final(download_folder):
 
 def iniciar_descarga():
     """
-    Maneja login, conteo y descarga de facturas.
+    Maneja login, conteo y descarga de facturas (optimizado).
     """
-    global facturas_descargadas, facturas_fallidas, total_registros
+    global facturas_descargadas, facturas_fallidas
     global cerrar_app, pdf_descargados, xml_descargados, session
+    global pdf_encontrados, xml_encontrados
 
     # Resetear contadores
-    pdf_descargados = 0 
+    pdf_descargados = 0
     xml_descargados = 0
+    pdf_encontrados = 0
+    xml_encontrados = 0
     facturas_descargadas = 0
     facturas_fallidas = 0
     cerrar_app = False
@@ -200,8 +185,10 @@ def iniciar_descarga():
     fruc = entry_fruc.get().strip()
 
     # Resetear labels visuales
-    pdf_label.config(text=f"PDF Descargados: {pdf_descargados}")
-    xml_label.config(text=f"XML Descargados: {xml_descargados}")
+    pdf_label.config(text="PDF Descargados: 0")
+    xml_label.config(text="XML Descargados: 0")
+    pdf_encontrados_label.config(text="PDF encontrados: 0")
+    xml_encontrados_label.config(text="XML encontrados: 0")
     progress['value'] = 0
 
     if not fstart or not fend:
@@ -230,16 +217,29 @@ def iniciar_descarga():
         "pCurrentPage": '1', "pPageSize": '10', "order": 'f_emision desc',
         "action": 'mdlLoadData2', "fstart": fstart, "fend": fend,
         "ftipdoc": '', "festado": '', "fserie": fserie,
-        "fnumDesde":'', "fnumHasta": '',
+        "fnumDesde": '', "fnumHasta": '',
         "fusuario": '', "fruc": fruc, "festacion": ''
     }
 
     pagsize = 10
 
-    # ✅ Primero contar encontrados
-    contar_archivos(session, payload_facturas.copy(), facturas_url, pagsize)
+    # ============================================================
+    # ✅ Obtener todas las facturas en una sola pasada
+    # ============================================================
+    filas = list(obtener_facturas(session, payload_facturas.copy(), pagsize))
 
-    # ✅ Ajustar progreso según selección del usuario
+    # Contar encontrados
+    for row in filas:
+        if row.get("urlpdf"):
+            pdf_encontrados += 1
+        if row.get("urlxml"):
+            xml_encontrados += 1
+
+    # Mostrar encontrados
+    pdf_encontrados_label.config(text=f"PDF encontrados: {pdf_encontrados}")
+    xml_encontrados_label.config(text=f"XML encontrados: {xml_encontrados}")
+
+    # Configurar progreso según selección
     if descargar_pdf.get() and descargar_xml.get():
         total_a_descargar = pdf_encontrados + xml_encontrados
     elif descargar_pdf.get():
@@ -250,13 +250,14 @@ def iniciar_descarga():
         total_a_descargar = 0
     progress['maximum'] = total_a_descargar
 
-    # ✅ Luego descargar
-    total_paginas = (total_registros + pagsize - 1) // pagsize
-    for page in range(1, total_paginas + 1):
-        if cerrar_app:
-            break
-        procesar_pagina(session, payload_facturas, page, pagsize, facturas_url, base_url, download_folder)
+    # ============================================================
+    # ✅ Descargar en paralelo con un solo ThreadPoolExecutor
+    # ============================================================
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        for row in filas:
+            executor.submit(procesar_fila, row, base_url, session, download_folder)
 
+    # Mostrar ventana final
     if not cerrar_app:
         mostrar_final(download_folder)
 
@@ -267,53 +268,93 @@ def iniciar_descarga():
 root = tk.Tk()
 root.title("Descarga de Facturas")
 
+# Crear un estilo personalizado para pestañas
+style = ttk.Style()
+style.configure("Custom.TNotebook.Tab", font=("Helvetica", 7, "bold"))
+
+# Crear notebook con estilo (contenedor de pestañas)
+notebook = ttk.Notebook(root, style="Custom.TNotebook")
+notebook.pack(fill="both", expand=True)
+
+# ============================================================
+# PESTAÑA NRO 01
+# ============================================================
+
+tab1 = tk.Frame(notebook)
+notebook.add(tab1, text="Descarga Archivos")
+
 # Variables de checkboxes
 descargar_pdf = tk.BooleanVar(value=True)
 descargar_xml = tk.BooleanVar(value=True)
 
 # Entradas
-tk.Label(root, text="  Fecha inicio:").grid(row=0, column=0, sticky="w")
-entry_fstart = DateEntry(root, date_pattern='dd/mm/yyyy')
+tk.Label(tab1, text="Fecha inicio:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+entry_fstart = DateEntry(tab1, date_pattern='dd/mm/yyyy')
 entry_fstart.grid(row=0, column=1)
 
-tk.Label(root, text="  Fecha fin:").grid(row=1, column=0, sticky="w")
-entry_fend = DateEntry(root, date_pattern='dd/mm/yyyy')
+tk.Label(tab1, text="Fecha fin:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+entry_fend = DateEntry(tab1, date_pattern='dd/mm/yyyy')
 entry_fend.grid(row=1, column=1)
 
-tk.Label(root, text="Serie de factura:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-entry_fserie = tk.Entry(root, width=15)
+tk.Label(tab1, text="Serie de factura:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+entry_fserie = tk.Entry(tab1, width=15)
 entry_fserie.grid(row=2, column=1, padx=5, pady=5)
 
-tk.Label(root, text="RUC Cliente:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-entry_fruc = tk.Entry(root, width=15)
+tk.Label(tab1, text="RUC Cliente:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+entry_fruc = tk.Entry(tab1, width=15)
 entry_fruc.grid(row=3, column=1, padx=5, pady=5)
 
 # Checkboxes PDF/XML
-tk.Checkbutton(root, text="Descargar PDF", variable=descargar_pdf).grid(row=5, column=0, padx=5, pady=5, sticky="w")
-tk.Checkbutton(root, text="Descargar XML", variable=descargar_xml).grid(row=5, column=1, padx=5, pady=5, sticky="w")
+tk.Checkbutton(tab1, text="Descargar PDF", variable=descargar_pdf).grid(row=5, column=0, padx=5, pady=5, sticky="w")
+tk.Checkbutton(tab1, text="Descargar XML", variable=descargar_xml).grid(row=5, column=1, padx=5, pady=5, sticky="w")
 
 # Labels para visualización
-pdf_encontrados_label = tk.Label(root, text="PDF encontrados: 0", width=20)
+pdf_encontrados_label = tk.Label(tab1, text="PDF encontrados: 0", width=20)
 pdf_encontrados_label.grid(row=6, column=0, sticky="w", padx=10)
-xml_encontrados_label = tk.Label(root, text="XML encontrados: 0", width=20)
+xml_encontrados_label = tk.Label(tab1, text="XML encontrados: 0", width=20)
 xml_encontrados_label.grid(row=6, column=1, sticky="w", padx=10)
 
-pdf_label = tk.Label(root, text="PDF Descargados: 0", width=20)
+pdf_label = tk.Label(tab1, text="PDF Descargados: 0", width=20)
 pdf_label.grid(row=7, column=0, sticky="w", padx=10)
-xml_label = tk.Label(root, text="XML Descargados: 0", width=20)
+xml_label = tk.Label(tab1, text="XML Descargados: 0", width=20)
 xml_label.grid(row=7, column=1, sticky="w", padx=10)
 
 # Botón iniciar
-btn_descargar = tk.Button(root, text="Iniciar descarga", command=lambda: threading.Thread(target=iniciar_descarga).start())
-btn_descargar.grid(row=8, column=0, columnspan=4, pady=20)
+btn_descargar = tk.Button(tab1, text="Iniciar descarga", command=lambda: threading.Thread(target=iniciar_descarga).start())
+btn_descargar.grid(row=8, column=0, columnspan=4, pady=10)
 
 # Barra progreso
-progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
+progress = ttk.Progressbar(tab1, orient="horizontal", length=400, mode="determinate")
 progress.grid(row=9, column=0, columnspan=4, pady=10)
+
+# ============================================================ 
+# # PESTAÑA NRO 02 # 
+# ============================================================ 
+
+tab2 = tk.Frame(notebook)
+notebook.add(tab2, text="Listado Documentos")
+
+# Entradas
+tk.Label(tab2, text="Fecha inicio:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+entry_fstart = DateEntry(tab2, date_pattern='dd/mm/yyyy')
+entry_fstart.grid(row=0, column=1)
+
+tk.Label(tab2, text="Fecha fin:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+entry_fend = DateEntry(tab2, date_pattern='dd/mm/yyyy')
+entry_fend.grid(row=1, column=1)
+
+tk.Label(tab2, text="Serie de factura:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+entry_fserie = tk.Entry(tab2, width=15)
+entry_fserie.grid(row=2, column=1, padx=5, pady=5)
+
+tk.Label(tab2, text="RUC Cliente:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+entry_fruc = tk.Entry(tab2, width=15)
+entry_fruc.grid(row=3, column=1, padx=5, pady=5)
 
 # ============================================================
 # CIERRE SEGURO
 # ============================================================
+
 def on_close():
     """
     Maneja el cierre seguro de la app:
