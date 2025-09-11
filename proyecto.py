@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkcalendar import DateEntry
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import pandas as pd
 
 # ============================================================
 # VARIABLES GLOBALES
@@ -305,27 +306,40 @@ tk.Label(tab2, text="RUC:").grid(row=3, column=0, sticky="w")
 entry_fruc2 = tk.Entry(tab2, width=15)
 entry_fruc2.grid(row=3, column=1)
 
+# Checkbox para filtrar solo estbaja = 1
+solo_estbaja = tk.BooleanVar(value=False)
+tk.Checkbutton(tab2, text="Solo Anulados", variable=solo_estbaja).grid(row=4, column=0, columnspan=2, sticky="w")
+
+# Label de estado
+estado_label = tk.Label(tab2, text="Estado: Esperando inicio")
+estado_label.grid(row=5, column=0, columnspan=2, sticky="w")
+
+# Botón Listar Facturas
 btn_listar = tk.Button(tab2, text="Listar Facturas", command=lambda: threading.Thread(target=listar_facturas_pestana2).start())
-btn_listar.grid(row=4, column=0, columnspan=2, pady=10)
+btn_listar.grid(row=5, column=0, columnspan=2, pady=10)
 
 columns = ("Serie-Numero", "Fecha", "Cliente", "Estado", "Total")
 tree2 = ttk.Treeview(tab2, columns=columns, show="headings")
 for col in columns:
     tree2.heading(col, text=col)
     tree2.column(col, width=120)
-tree2.grid(row=5, column=0, columnspan=2, pady=10)
+tree2.grid(row=6, column=0, columnspan=2, pady=10)
 
 scrollbar = ttk.Scrollbar(tab2, orient="vertical", command=tree2.yview)
 tree2.configure(yscroll=scrollbar.set)
-scrollbar.grid(row=5, column=2, sticky='ns')
+scrollbar.grid(row=6, column=2, sticky='ns')
 
 # ============================================================
-# FUNCIÓN ACTUALIZADA PESTAÑA 2
+# FUNCIÓN PESTAÑA 2: Listado con filtros Serie y Solo Anulados
 # ============================================================
 def listar_facturas_pestana2():
     global session2, cerrar_app2
     session2 = requests.Session()
     cerrar_app2 = False
+
+    # Actualizar estado a "En proceso"
+    estado_label.config(text="Estado: Listando facturas...")
+    root.update_idletasks()
 
     # Limpiar tabla antes de listar
     for item in tree2.get_children():
@@ -333,8 +347,9 @@ def listar_facturas_pestana2():
 
     fstart = entry_fstart2.get().strip()
     fend = entry_fend2.get().strip()
-    fserie = entry_fserie2.get().strip()
+    fserie_input = entry_fserie2.get().strip()
     fruc = entry_fruc2.get().strip()
+    filtrar_estbaja = solo_estbaja.get()  # True si el checkbox está marcado
 
     # Login
     payload_login = {
@@ -348,22 +363,79 @@ def listar_facturas_pestana2():
     payload_facturas = {
         "pCurrentPage": '1', "pPageSize": '100', "order": 'f_emision desc',
         "action": 'mdlLoadData2', "fstart": fstart, "fend": fend,
-        "ftipdoc": '', "festado": '', "fserie": fserie,
+        "ftipdoc": '', "festado": '', "fserie": '',  # siempre vacío para obtener todas
         "fnumDesde":'', "fnumHasta": '',
         "fusuario": '', "fruc": fruc, "festacion": ''
     }
 
-    resp = session2.post(facturas_url, data=payload_facturas, headers=headers)
-    data = resp.json()
+    try:
+        # Primera consulta para obtener cantidad de registros
+        resp = session2.post(facturas_url, data=payload_facturas, headers=headers)
+        try:
+            data = resp.json()
+        except:
+            messagebox.showerror("Error", "No se pudo obtener datos. Verifica conexión y filtros.")
+            estado_label.config(text="Estado: Error al listar")
+            return
 
-    for row in data.get("rows", []):
-        tree2.insert("", "end", values=(
-            f"{row.get('serie')}-{row.get('numero')}",
-            row.get("f_emision"),
-            row.get("razonsocial"),
-            row.get("estbaja"),  # estado interno como dato informativo
-            row.get("total")
-        ))
+        total_registros = data.get("records", 0)
+        pagsize = 100
+        total_paginas = (total_registros + pagsize - 1) // pagsize
+
+        # Recorrer todas las páginas
+        for page in range(1, total_paginas + 1):
+            if cerrar_app2:
+                break
+            payload_facturas["pCurrentPage"] = str(page)
+            resp_page = session2.post(facturas_url, data=payload_facturas, headers=headers)
+            try:
+                data_page = resp_page.json()
+            except:
+                continue  # Saltar página si no es JSON válido
+            for row in data_page.get("rows", []):
+                # Filtro de Serie: si hay valor, solo mostrar esa serie
+                if fserie_input and row.get("serie") != fserie_input:
+                    continue
+                # Filtro Solo Anulados
+                if filtrar_estbaja and row.get("estbaja") != '1':
+                    continue
+                tree2.insert("", "end", values=(
+                    f"{row.get('serie')}-{row.get('numero')}",
+                    row.get("f_emision"),
+                    row.get("razonsocial"),
+                    row.get("estbaja"),
+                    row.get("total")
+                ))
+        # Actualizar estado a "Finalizado"
+        estado_label.config(text=f"Estado: Listado finalizado. {len(tree2.get_children())} facturas mostradas")
+    except Exception as e:
+        messagebox.showerror("Error", f"Ocurrió un error al listar facturas:\n{e}")
+        estado_label.config(text="Estado: Error al listar")
+
+# ============================================================
+# FUNCION EXPORTAR A EXCEL
+# ============================================================
+def exportar_a_excel():
+    filas = tree2.get_children()
+    if not filas:
+        messagebox.showwarning("Atención", "No hay datos para exportar")
+        return
+
+    datos = []
+    for f in filas:
+        datos.append(tree2.item(f)["values"])
+
+    df = pd.DataFrame(datos, columns=columns)
+
+    ruta_guardar = filedialog.asksaveasfilename(defaultextension=".xlsx",
+                                                filetypes=[("Archivos Excel", "*.xlsx")])
+    if ruta_guardar:
+        df.to_excel(ruta_guardar, index=False)
+        messagebox.showinfo("Éxito", f"Listado exportado correctamente a:\n{ruta_guardar}")
+
+# Botón exportar Excel
+btn_exportar = tk.Button(tab2, text="Exportar a Excel", command=exportar_a_excel)
+btn_exportar.grid(row=7, column=0, columnspan=2, pady=10)
 
 
 # ============================================================
